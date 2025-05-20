@@ -24,8 +24,10 @@ A command-line tool for collecting, organizing, and exploring academic research 
 
 1. **Create and Activate Virtual Environment**
 
-  ```python3 -m venv venv 
-source venv/bin/activate```
+```bash
+python3 -m venv venv 
+source venv/bin/activate
+```
 
 2. **Install Required Packages**
 
@@ -47,16 +49,24 @@ source venv/bin/activate```
 
 ### Collect Articles from All APIs
 
-```python3 scrapp.py```
+```bash
+python3 scrapp.py
+```
 
 ### Build a Topic Taxonomy and Word Cloud
 
-```python3 scrapp.py --build-taxonomy```
+```bash
+python3 scrapp.py --build-taxonomy
+```
 
 ### Suggest and Add New Search Terms
 
-```python scrappy.py --suggest-terms```
+```bash
+python scrappy.py --suggest-terms
+```
 
 ### Perform Recursive Topic Discovery via DFS
 
-```python scrappy.py --build-tree --tree-api semantic_scholar --depth 3```
+```bash
+python scrappy.py --build-tree --tree-api semantic_scholar --depth 3
+```
