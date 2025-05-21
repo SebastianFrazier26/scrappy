@@ -32,7 +32,7 @@ source venv/bin/activate
 2. **Install Required Packages**
 
 ```bash
-pip install bertopic sentence-transformers scikit-learn wordcloud matplotlib tqdm beautifulsoup4 requests pandas nltk lxml numpy==1.23.5
+pip install bertopic sentence-transformers scikit-learn wordcloud matplotlib tqdm beautifulsoup4 requests pandas nltk lxml numpy==1.23.5 transformers==4.39.3
 ```
 
 ## 🔧 CLI Flags

@@ -18,6 +18,7 @@ import json
 from datetime import datetime
 import os
 from article_querry import load_data, filter_articles
+import re
 
 nltk.download('stopwords')
 nltk.download('punkt')
@@ -42,6 +43,9 @@ def predict_term_category(term, model, vectorizer):
     X = vectorizer.transform([term])
     return model.predict(X)[0]
 
+def normalize(term):
+    return re.sub(r'[^a-zA-Z0-9 ]', '', term.lower()).strip()
+
 TERMS_FILE = "search_terms.json"
 
 ### === SEARCH TERM MANAGEMENT === ###
@@ -59,16 +63,6 @@ def get_search_terms():
     print("\nCurrent search terms:")
     for t in base_terms:
         print(f"- {t}")
-
-    add_more = input("\nWould you like to add more search terms manually? (y/n): ").strip().lower()
-    if add_more == 'y':
-        print("Enter new terms one per line. Type 'done' when finished:")
-        while True:
-            new_term = input("New term: ").strip()
-            if new_term.lower() == 'done':
-                break
-            if new_term and new_term not in base_terms:
-                base_terms.append(new_term)
 
     with open(TERMS_FILE, 'w') as f:
         json.dump(base_terms, f, indent=2)
@@ -151,7 +145,6 @@ def fetch_google_scholar(query, serpapi_key, limit=200):
         time.sleep(1)
     return all_results
 
-# (Other source fetch functions like Semantic Scholar, PubMed, arXiv, Google Scholar should be here)
 def fetch_semantic_scholar(query, limit=100):
     base_url = "https://api.semanticscholar.org/graph/v1/paper/search"
     all_results = []
@@ -165,14 +158,21 @@ def fetch_semantic_scholar(query, limit=100):
         print(f"[Semantic Scholar] Querying: {term}")
         params = {
             "query": term,
-            "limit": limit,
+            "limit": min(limit, 100),
             "fields": "title,abstract,year,authors,url"
         }
 
         try:
+            start = time.time()
             response = requests.get(base_url, params=params, headers=headers, timeout=10)
+            elapsed = time.time() - start
+
+            if elapsed < 1.1:
+                time.sleep(1.1 - elapsed)
+
             response.raise_for_status()
             data = response.json()
+
         except requests.exceptions.RequestException as e:
             print(f"[❌] Semantic Scholar API error for '{term}': {e}")
             continue
@@ -197,8 +197,6 @@ def fetch_semantic_scholar(query, limit=100):
                 "term": term,
                 "year": paper.get("year", "")
             })
-
-        time.sleep(1)  # Enforce 1 request per second (API limit)
 
     return all_results
 
@@ -354,12 +352,9 @@ def merge_with_existing(df_new):
 
 ### === TOPIC SUGGESTIONS === ###
 def suggest_terms_from_articles(df, top_n=100):
-    from collections import Counter
-
-    # Expansion strategies
     THEMES_INFRA = ["security", "safety", "trustworthiness"]
     THEMES_THREAT = ["hospitals", "healthcare", "public health"]
-    THREAT_KEYWORDS = {"ransomware", "malware", "attack", "breach", "incident", "phishing", "exploit", "intrusion"}
+    health_keywords = {"hospital", "health", "healthcare", "medical", "clinic", "public health"}
 
     # Load existing terms
     if os.path.exists(TERMS_FILE):
@@ -368,22 +363,19 @@ def suggest_terms_from_articles(df, top_n=100):
     else:
         existing_terms = set()
 
-    # Extract term frequencies from combined title+abstract
+    # Extract terms from text
     text_data = (df['title'].fillna('') + " " + df['abstract'].fillna('')).tolist()
     vectorizer = CountVectorizer(stop_words='english', ngram_range=(1, 3), max_features=1000)
     X = vectorizer.fit_transform(text_data)
     freqs = X.sum(axis=0).A1
     terms = vectorizer.get_feature_names_out()
     ranked = sorted(zip(terms, freqs), key=lambda x: -x[1])
-
-    # Filter and select top terms
     suggestions = [(term, int(freq)) for term, freq in ranked if term.lower() not in existing_terms][:top_n]
 
-    # Context examples
+    # Show examples
     context_map = {}
     for term, _ in suggestions:
-        term_lower = term.lower()
-        matches = [txt for txt in text_data if term_lower in txt.lower()]
+        matches = [txt for txt in text_data if term.lower() in txt.lower()]
         context_map[term] = matches[:2]
 
     print("\nSuggested additional search terms based on article content:\n")
@@ -394,27 +386,20 @@ def suggest_terms_from_articles(df, top_n=100):
             print(f"    Example {i+1}: {short}")
         print()
 
-    # Ask user to add contextualized terms
+    # Ask for contextualization
     auto_add = input("Would you like to add contextualized versions of these terms to your saved search terms? (y/n): ").strip().lower()
     if auto_add == 'y':
+        model, vec = load_classifier()
         new_terms = []
-        health_keywords = {"hospital", "health", "healthcare", "medical", "clinic", "public health"}
+
         for term, _ in suggestions:
-            term_lower = term.lower()
-            tokens = set(term_lower.split())
-
-            # Choose strategy based on keyword content
-            model, vectorizer = load_classifier()
-            new_terms = []
-
-            for term, _ in suggestions:
-                category = predict_term_category(term, model, vectorizer)
+            category = predict_term_category(term, model, vec)
+            tokens = set(term.lower().split())
 
             if category == "threat":
                 for theme in THEMES_THREAT:
                     contextual_term = f"{term} AND {theme}"
                     if contextual_term.lower() not in existing_terms:
-                        tokens = set(contextual_term.lower().split())
                         if not any(h in tokens for h in health_keywords):
                             contextual_term += " AND healthcare"
                         new_terms.append(contextual_term)
@@ -426,9 +411,12 @@ def suggest_terms_from_articles(df, top_n=100):
                             contextual_term += " AND healthcare"
                         new_terms.append(contextual_term)
 
-        # Update terms file
-        with open(TERMS_FILE, 'r') as f:
-            current_terms = json.load(f)
+        # Save contextualized terms
+        current_terms = []
+        if os.path.exists(TERMS_FILE):
+            with open(TERMS_FILE, 'r') as f:
+                current_terms = json.load(f)
+
         current_terms.extend(new_terms)
         with open(TERMS_FILE, 'w') as f:
             json.dump(current_terms, f, indent=2)
@@ -437,6 +425,8 @@ def suggest_terms_from_articles(df, top_n=100):
         for t in new_terms:
             print(f"  - {t}")
 
+    # ✅ Always return the flat suggestions (non-contextualized)
+    return [term for term, _ in suggestions]
 
 def recursive_keyword_tree(base_term, api_source, depth, visited=None):
     if visited is None:
@@ -444,20 +434,24 @@ def recursive_keyword_tree(base_term, api_source, depth, visited=None):
 
     tree = {}
 
-    # Prevent loops and duplication
-    if base_term in visited or depth <= 0:
+    norm_base = normalize(base_term)
+    if norm_base in visited or depth <= 0:
         return tree
 
-    visited.add(base_term)
+    visited.add(norm_base)
+
+    print(f"\n[Depth {depth}] Exploring: \"{base_term}\"")
 
     # Fetch articles
-    print(f"\n[Depth {depth}] Exploring: \"{base_term}\"")
     if api_source == "semantic_scholar":
         articles = fetch_semantic_scholar([base_term], limit=50)
     elif api_source == "pubmed":
         articles = fetch_pubmed([base_term], retmax=50)
     elif api_source == "arxiv":
         articles = fetch_arxiv([base_term], max_results=50)
+    elif api_source == "google_scholar":
+        fetch_google_scholar([base_term], SERPAPI_KEY, limit=50)
+
     else:
         print("Unsupported API for tree building.")
         return {}
@@ -465,26 +459,37 @@ def recursive_keyword_tree(base_term, api_source, depth, visited=None):
     if not articles:
         return {}
 
-    # Turn into DataFrame
+    # Build DataFrame
     df = pd.DataFrame(articles)
     text_data = (df['title'].fillna('') + " " + df['abstract'].fillna('')).tolist()
 
-    # Extract top N keywords
+    # Extract top keywords
     vectorizer = CountVectorizer(stop_words='english', ngram_range=(1, 2), max_features=500)
     X = vectorizer.fit_transform(text_data)
     freqs = X.sum(axis=0).A1
     terms = vectorizer.get_feature_names_out()
     ranked = sorted(zip(terms, freqs), key=lambda x: -x[1])
 
-    children = [term for term, _ in ranked[:5] if term not in visited and len(term.split()) <= 3]
+    base_words = set(normalize(base_term).split())
+    children = []
+
+    for term, _ in ranked:
+        norm_term = normalize(term)
+        term_words = set(norm_term.split())
+        
+        # Skip if already visited or if it's just a subset of base
+        if norm_term in visited:
+            continue
+        if term_words.issubset(base_words):
+            continue
+
+        children.append(norm_term)
+        if len(children) >= 5:
+            break
 
     for child in children:
-        base_words = set(base_term.lower().split())
-        child_words = [w for w in child.lower().split() if w not in base_words]
-        if not child_words:
-            continue  # skip if child is fully redundant
-        combined = base_term + " " + " ".join(child_words)
-        tree[child] = recursive_keyword_tree(combined, api_source, depth - 1, visited)
+        tree[child] = recursive_keyword_tree(child, api_source, depth - 1, visited)
+
     return tree
 
 ### === TAXONOMY === ###
@@ -546,6 +551,11 @@ def main(args):
             print("No new articles fetched.")
 
     if args.suggest_terms:
+        if 'df_new' not in locals():
+            if not os.path.exists("raw_articles.csv"):
+                print("❌ Cannot suggest terms: no articles available. Run with --fetch-articles first.")
+                return
+            df_new = pd.read_csv("raw_articles.csv")
         suggested_terms = suggest_terms_from_articles(df_new)
         auto_add = input("\nWould you like to add any of these suggested terms to your saved search terms? (y/n): ").strip().lower()
         if auto_add == 'y':
